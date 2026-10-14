@@ -1,0 +1,57 @@
+flowchart LR
+    U[Web / Mobile clients]
+
+    subgraph Edge[Global edge]
+        DNS[Global DNS / Anycast]
+        CDN[Multi-CDN]
+        WSG[WebSocket gateways<br/>connection draining]
+    end
+
+    subgraph Control[Regional control plane]
+        API[API gateway<br/>Auth + rate limits]
+        RS[Room Service<br/>sharded room actors]
+        DIR[Room directory<br/>lease + fencing epoch]
+        FAN[Room fan-out<br/>regional pub/sub]
+        CACHE[Redis cache<br/>TTL only]
+    end
+
+    subgraph Data[Durable data and async plane]
+        ROOM[(Room snapshots<br/>conditional KV/SQL)]
+        CAT[(Catalogue + rights<br/>Postgres-compatible)]
+        SEARCH[(OpenSearch<br/>search-as-you-type)]
+        BUS[(Kafka / Redpanda<br/>ordered events)]
+        HIST[(Listening history<br/>wide-column/KV)]
+        LEDGER[(Royalty ledger<br/>append-only)]
+        LAKE[(Object lake + warehouse<br/>analytics)]
+    end
+
+    subgraph Media[Media plane]
+        OBJ[(Object storage<br/>masters + CMAF renditions)]
+        TRANS[Transcoding + release workflow]
+    end
+
+    U --> DNS
+    DNS --> WSG
+    DNS --> CDN
+    U -. control WebSocket .-> WSG
+    U -. audio HLS/DASH .-> CDN
+    WSG --> API
+    API --> RS
+    RS --> DIR
+    RS --> ROOM
+    RS --> FAN
+    FAN --> WSG
+    RS --> BUS
+    API --> CAT
+    CAT --> SEARCH
+    CAT --> BUS
+    BUS --> HIST
+    BUS --> LEDGER
+    BUS --> LAKE
+    TRANS --> OBJ
+    TRANS --> CAT
+    OBJ --> CDN
+    CACHE -. ephemeral .- RS
+
+    classDef store fill:#eef6ff,stroke:#2563eb,stroke-width:1px;
+    class ROOM,CAT,SEARCH,BUS,HIST,LEDGER,LAKE,OBJ store;

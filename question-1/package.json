@@ -1,0 +1,32 @@
+{
+  "name": "sapien-robotics-full-stack-assignment",
+  "version": "1.0.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -k \"npm run dev:server\" \"npm run dev:web\"",
+    "dev:server": "npm run build:packages && tsx apps/server/src/index.ts",
+    "dev:web": "vite --config apps/web/vite.config.ts",
+    "build": "npm run build:protocol && npm run build:game-core && npm run build:server && npm run build:web",
+    "build:packages": "npm run build:protocol && npm run build:game-core",
+    "build:protocol": "npm run build --workspace @sapien/protocol",
+    "build:game-core": "npm run build --workspace @sapien/game-core",
+    "build:server": "npm run build --workspace @sapien/server",
+    "build:web": "npm run build --workspace @sapien/web",
+    "start:all": "docker compose up --build",
+    "stop:all": "docker compose down",
+    "start": "npm run start --workspace @sapien/server",
+    "test": "npm run test --workspace @sapien/game-core",
+    "smoke": "node tests/smoke.mjs",
+    "loadtest": "node tests/load.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "concurrently": "^9.1.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}

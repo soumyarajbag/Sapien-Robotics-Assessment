@@ -10,8 +10,8 @@ sequenceDiagram
     H->>G: Pause(roomVersion, idempotencyKey)
     G->>A: Forward command
     A->>A: Validate host, version, and idempotency key
-    A->>A: Freeze current position; set effectiveAt = serverNow + 400 ms
-    A->>S: Conditional write(state=PAUSED, epoch, version+1)
+    A->>A: Freeze current position; set effectiveAt = serverNow plus 400 ms
+    A->>S: Conditional write(state=PAUSED, epoch, version plus one)
     S-->>A: Commit succeeds
     A->>F: Publish one Pause event with effectiveAt
     F-->>G: Broadcast to room gateway groups

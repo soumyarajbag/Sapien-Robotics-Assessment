@@ -13,6 +13,7 @@ flowchart LR
         DIR[Room directory<br/>lease + fencing epoch]
         FAN[Room fan-out<br/>regional pub/sub]
         CACHE[Redis cache<br/>TTL only]
+        TOKEN[Playback token service<br/>signed URLs and rights]
     end
 
     subgraph Data[Durable data and async plane]
@@ -23,6 +24,7 @@ flowchart LR
         HIST[(Listening history<br/>wide-column/KV)]
         LEDGER[(Royalty ledger<br/>append-only)]
         LAKE[(Object lake + warehouse<br/>analytics)]
+        PLAY[(Playlists and follows<br/>relational DB)]
     end
 
     subgraph Media[Media plane]
@@ -37,14 +39,18 @@ flowchart LR
     U -. audio HLS/DASH .-> CDN
     WSG --> API
     API --> RS
+    API --> SEARCH
+    API --> TOKEN
+    API --> PLAY
     RS --> DIR
     RS --> ROOM
     RS --> FAN
     FAN --> WSG
     RS --> BUS
     API --> CAT
-    CAT --> SEARCH
-    CAT --> BUS
+    TOKEN --> CAT
+    CAT -->|outbox| BUS
+    BUS -->|indexer| SEARCH
     BUS --> HIST
     BUS --> LEDGER
     BUS --> LAKE

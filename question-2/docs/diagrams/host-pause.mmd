@@ -6,21 +6,21 @@ sequenceDiagram
     participant A as Room Actor
     participant S as Snapshot Store
     participant F as Fanout Layer
-    participant L as Listener Clients
+    participant L as 5,000 listener clients
 
-    H->>G: Send Pause command
+    H->>G: Pause roomVersion and idempotencyKey
     G->>A: Forward command
     A->>A: Validate host and room version
-    A->>A: Check idempotency key
+    A->>A: Check idempotency key and fencing epoch
     A->>A: Freeze playback position
-    A->>A: Set pause time to server time plus 400 ms
+    A->>A: Set effectiveAtServerTime to server time plus 400 ms
 
-    A->>S: Write paused state and increment version
+    A->>S: Conditional write paused state, epoch, increment roomVersion
     S-->>A: Commit successful
 
-    A->>F: Publish pause event
+    A->>F: Publish roomVersion, epoch, effectiveAtServerTime
     F-->>G: Distribute event to gateway groups
-    G-->>L: Broadcast pause event
+    G-->>L: Broadcast version, epoch, and effectiveAtServerTime
 
     A-->>G: Acknowledge committed room version
     G-->>H: Pause accepted

@@ -38,6 +38,7 @@ flowchart LR
         DIR[Room directory<br/>lease + fencing epoch]
         FAN[Room fan-out<br/>regional pub/sub]
         CACHE[Redis cache<br/>TTL only]
+        TOKEN[Playback token service<br/>signed URLs and rights]
     end
 
     subgraph Data[Durable data and async plane]
@@ -48,6 +49,7 @@ flowchart LR
         HIST[(Listening history<br/>wide-column/KV)]
         LEDGER[(Royalty ledger<br/>append-only)]
         LAKE[(Object lake + warehouse<br/>analytics)]
+        PLAY[(Playlists and follows<br/>relational DB)]
     end
 
     subgraph Media[Media plane]
@@ -62,14 +64,18 @@ flowchart LR
     U -. audio HLS/DASH .-> CDN
     WSG --> API
     API --> RS
+    API --> SEARCH
+    API --> TOKEN
+    API --> PLAY
     RS --> DIR
     RS --> ROOM
     RS --> FAN
     FAN --> WSG
     RS --> BUS
     API --> CAT
-    CAT --> SEARCH
-    CAT --> BUS
+    TOKEN --> CAT
+    CAT -->|outbox| BUS
+    BUS -->|indexer| SEARCH
     BUS --> HIST
     BUS --> LEDGER
     BUS --> LAKE
@@ -77,6 +83,9 @@ flowchart LR
     TRANS --> CAT
     OBJ --> CDN
     CACHE -. ephemeral .- RS
+
+    classDef store fill:#eef6ff,stroke:#2563eb,stroke-width:1px;
+    class ROOM,CAT,SEARCH,BUS,HIST,LEDGER,LAKE,OBJ store;
 ```
 
 ## 2. Audio delivery and fast playback
@@ -137,7 +146,7 @@ position(now) = anchorPositionMs + (now - anchorServerTimeMs)
 
 The actor serializes commands, computes a new anchor, increments `roomVersion`, persists the new snapshot using a conditional write, and publishes the resulting event. A command includes an idempotency key. Repeated client retries return the same version rather than applying the action twice.
 
-The room snapshot is stored in a strongly consistent, multi-AZ key-value store with conditional writes (for example DynamoDB in a single home region, or a multi-region SQL/KV equivalent). A compact room event stream is retained in Kafka/Redpanda for replay, analytics, and audit. The database snapshot is the fast recovery point; the stream is not required for every live read.
+The room snapshot is stored in a strongly consistent, multi-AZ key-value store with conditional writes and synchronous replication to a paired failover region (for example, a multi-region SQL/KV equivalent). A single-home-region deployment can be used for the first milestone, but it has a bounded regional-outage recovery point and does not provide the synchronous failover guarantee described below. A compact room event stream is retained in Kafka/Redpanda for replay, analytics, and audit. The database snapshot is the fast recovery point; the stream is not required for every live read.
 
 ### Clock and drift control
 
@@ -158,36 +167,43 @@ The join endpoint atomically returns a signed playback token, a room snapshot, t
 
 ### A host pause in a 5,000-listener room
 
-The host sends `Pause(roomVersion, idempotencyKey)` to any gateway. The actor rejects a stale version, freezes the current position, persists the new state, and chooses `effectiveAt = serverNow + 400 ms`. It publishes one small event to the room fan-out layer. Gateways broadcast the same event to all 5,000 sockets; they do not independently calculate a different pause time. Each client pauses at `effectiveAt`, reports the observed drift, and corrects if necessary.
+The host sends `Pause(roomVersion, idempotencyKey)` to any gateway. The actor rejects a stale version, verifies its fencing `epoch`, freezes the current position, persists the new state with a conditional write, and chooses `effectiveAtServerTime = serverNow plus 400 ms`. It publishes one small event containing `roomVersion`, `epoch`, and `effectiveAtServerTime` to the room fan-out layer. Gateways broadcast the same event to all 5,000 sockets; they do not independently calculate a different pause time. Each client pauses at `effectiveAtServerTime`, reports the observed drift, and corrects if necessary.
 
 The full flow is in the [pause sequence diagram](diagrams/host-pause.mmd).
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant H as Host client
-    participant G as WebSocket gateway
-    participant A as Room actor
-    participant S as Room snapshot store
-    participant F as Fan-out layer
+    participant H as Host
+    participant G as WebSocket Gateway
+    participant A as Room Actor
+    participant S as Snapshot Store
+    participant F as Fanout Layer
     participant L as 5,000 listener clients
 
-    H->>G: Pause(roomVersion, idempotencyKey)
+    H->>G: Pause roomVersion and idempotencyKey
     G->>A: Forward command
-    A->>A: Validate host, version, and idempotency key
-    A->>A: Freeze position; set effectiveAt = serverNow + 400 ms
-    A->>S: Conditional write(state=PAUSED, epoch, version+1)
-    S-->>A: Commit succeeds
-    A->>F: Publish one Pause event with effectiveAt
-    F-->>G: Broadcast to room gateway groups
-    G-->>L: Same version, epoch, and effectiveAt
-    L->>L: Schedule pause using server clock offset
-    L-->>G: Applied telemetry: position, drift, buffer
-    G-->>A: Aggregated drift/health telemetry
-    A-->>G: Ack host with committed roomVersion
+    A->>A: Validate host and room version
+    A->>A: Check idempotency key and fencing epoch
+    A->>A: Freeze playback position
+    A->>A: Set effectiveAtServerTime to server time plus 400 ms
+
+    A->>S: Conditional write paused state, epoch, increment roomVersion
+    S-->>A: Commit successful
+
+    A->>F: Publish roomVersion, epoch, effectiveAtServerTime
+    F-->>G: Distribute event to gateway groups
+    G-->>L: Broadcast version, epoch, and effectiveAtServerTime
+
+    A-->>G: Acknowledge committed room version
     G-->>H: Pause accepted
 
-    Note over L: Healthy clients pause together. Slow clients correct or rebuffer; none can block the room.
+    L->>L: Schedule pause using server clock offset
+    L-->>G: Report position drift and buffer health
+    G-->>A: Aggregate client telemetry
+
+    Note over L: Healthy clients pause together
+    Note over A,L: Slow clients recover independently
 ```
 
 ## 5. Data and storage choices
@@ -223,7 +239,7 @@ The service runs across at least three availability zones per region. The room d
 
 5. **The event bus is delayed or unavailable.** Live room commands use the room store and regional fan-out path, not the analytics consumers. The event bus is retried through a durable outbox; analytics and royalty views become stale but accepted control actions remain available. If the room store itself is unavailable, the service rejects mutations instead of acknowledging state it cannot persist.
 
-6. **A whole region is unavailable.** Audio objects are replicated and served through a multi-region/multi-CDN origin. A global room directory routes reconnects to the paired region. The standby actor acquires a fencing token and restores the latest synchronously replicated snapshot; clients receive a new epoch and resync. The explicit trade-off is a short control-plane interruption during failover, while already-buffered audio may continue. If the business requires zero lost room commands, use a globally consistent room store; otherwise the design accepts bounded, documented failover loss for the last unreplicated command.
+6. **A whole region is unavailable.** Audio objects are replicated and served through a multi-region/multi-CDN origin. A global room directory routes reconnects to the paired region. The standby actor acquires a fencing token and restores the latest synchronously replicated snapshot; clients receive a new epoch and resync. The explicit trade-off is a short control-plane interruption during failover, while already-buffered audio may continue. A command that was still in flight during the outage may be retried with its idempotency key; a committed room mutation is not acknowledged until it is durably accepted by the room store.
 
 7. **A release is published with one bad rendition or incomplete index.** The asset remains `PROCESSING` until validation passes for every required rendition. The catalogue outbox and indexer are idempotent. A failed index update is retried without republishing the track, and the active asset version can be rolled back.
 
@@ -249,7 +265,7 @@ The primary service-level indicators are:
 - CDN cache hit ratio, time to first byte, segment error rate, bitrate switches, and origin load;
 - room-store conditional-write conflicts/latency, lease failovers, event-bus lag, outbox age, and search indexing lag.
 
-Dashboards should show distributions, not only averages, split by region, device, network type, bitrate, and room size. A synthetic client fleet should join rooms of 2, 100, and 5,000 listeners and continuously assert that the p95 drift SLO holds. Correlating `roomVersion`, `epoch`, `effectiveAt`, and client telemetry makes a single bad pause traceable end to end.
+Dashboards should show distributions, not only averages, split by region, device, network type, bitrate, and room size. A synthetic client fleet should join rooms of 2, 100, and 5,000 listeners and continuously assert that the p95 drift SLO holds. Correlating `roomVersion`, `epoch`, `effectiveAtServerTime`, and client telemetry makes a single bad pause traceable end to end.
 
 ## 8. Alternatives rejected
 
@@ -265,7 +281,7 @@ Dashboards should show distributions, not only averages, split by region, device
 ### First milestone
 
 1. A single-region vertical slice: catalogue lookup, one encoded rendition, CDN/object-storage playback, room creation/join, host pause/seek, queue, and WebSocket room events.
-2. Versioned room snapshots with conditional writes, idempotency keys, scheduled `effectiveAt`, client clock-offset estimation, and drift telemetry.
+2. Versioned room snapshots with conditional writes, idempotency keys, scheduled `effectiveAtServerTime`, client clock-offset estimation, and drift telemetry.
 3. A basic relational catalogue plus outbox-driven search indexing.
 4. Metrics and a synthetic test that measures pause propagation and drift for hundreds of simulated clients before attempting a 5,000-client load test.
 

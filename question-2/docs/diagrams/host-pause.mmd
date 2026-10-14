@@ -1,25 +1,33 @@
+
 sequenceDiagram
     autonumber
-    participant H as Host client
-    participant G as WebSocket gateway
-    participant A as Room actor
-    participant S as Room snapshot store
-    participant F as Fan-out layer
-    participant L as 5,000 listener clients
+    participant H as Host
+    participant G as WebSocket Gateway
+    participant A as Room Actor
+    participant S as Snapshot Store
+    participant F as Fanout Layer
+    participant L as Listener Clients
 
-    H->>G: Pause(roomVersion, idempotencyKey)
+    H->>G: Send Pause command
     G->>A: Forward command
-    A->>A: Validate host, version, and idempotency key
-    A->>A: Freeze current position; set effectiveAt = serverNow plus 400 ms
-    A->>S: Conditional write(state=PAUSED, epoch, version plus one)
-    S-->>A: Commit succeeds
-    A->>F: Publish one Pause event with effectiveAt
-    F-->>G: Broadcast to room gateway groups
-    G-->>L: Same version, epoch, and effectiveAt
-    L->>L: Schedule pause at effectiveAt using server clock offset
-    L-->>G: Applied telemetry: position, drift, buffer, client version
-    G-->>A: Aggregated drift/health telemetry
-    A-->>G: Ack host with committed roomVersion
+    A->>A: Validate host and room version
+    A->>A: Check idempotency key
+    A->>A: Freeze playback position
+    A->>A: Set pause time to server time plus 400 ms
+
+    A->>S: Write paused state and increment version
+    S-->>A: Commit successful
+
+    A->>F: Publish pause event
+    F-->>G: Distribute event to gateway groups
+    G-->>L: Broadcast pause event
+
+    A-->>G: Acknowledge committed room version
     G-->>H: Pause accepted
 
-    Note over L: Healthy clients pause together. Slow clients correct or rebuffer; none can block the room.
+    L->>L: Schedule pause using server clock offset
+    L-->>G: Report position drift and buffer health
+    G-->>A: Aggregate client telemetry
+
+    Note over L: Healthy clients pause together
+    Note over A,L: Slow clients recover independently
